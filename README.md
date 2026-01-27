@@ -36,7 +36,7 @@ Use this to cut and reconstruct individual sprites from the extracted textures u
 # Reconstruct sprites from an SC file
 python sc_decode.py -s path/to/ui.sc
 ```
-The reconstructed sprites will be saved in a folder named `<filename>_out`.
+The reconstructed sprites will be saved in a folder named `<filename>_out`.                                         .
 
 ## Credits
 * [athlan20](https://github.com/athlan20)
