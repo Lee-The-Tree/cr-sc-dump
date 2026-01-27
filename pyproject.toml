@@ -1,0 +1,11 @@
+[project]
+name = "cr-sc-dump"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.12"
+dependencies = [
+    "Pillow",
+    "pylzham",
+    "texture2ddecoder",
+    "zstandard",
+]
