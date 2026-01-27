@@ -1,9 +1,8 @@
 import sys
-from io import BytesIO
-from Reader import *
-from PIL import Image, ImageDraw
 import os
 import argparse
+from PIL import Image, ImageDraw
+from Reader import Reader, decompress, ReadByte, ReadUint16, ReadInt16, ReadUint32, ReadInt32, ReadString
 
 
 # Fixed version for both highres and lowres tex (also re-written for better support)
@@ -57,12 +56,19 @@ def WriteShape(spritedata, sheetdata, ShapeCount, TotalsTexture, filein):
             tmpY = spritedata[x]['Regions'][y]['SpriteHeight']
 
             # determine origin pixel (0,0)
-            spritedata[x]['Regions'][y]['RegionZeroX'] = \
-                int(round(abs(spritedata[x]['Regions'][y]['Left']) * (
-                            tmpX / (spritedata[x]['Regions'][y]['Right'] - spritedata[x]['Regions'][y]['Left']))))
-            spritedata[x]['Regions'][y]['RegionZeroY'] = \
-                int(round(abs(spritedata[x]['Regions'][y]['Bottom']) * (
-                            tmpY / (spritedata[x]['Regions'][y]['Top'] - spritedata[x]['Regions'][y]['Bottom']))))
+            try:
+                spritedata[x]['Regions'][y]['RegionZeroX'] = \
+                    int(round(abs(spritedata[x]['Regions'][y]['Left']) * (
+                                tmpX / (spritedata[x]['Regions'][y]['Right'] - spritedata[x]['Regions'][y]['Left']))))
+            except ZeroDivisionError:
+                spritedata[x]['Regions'][y]['RegionZeroX'] = 0
+                
+            try:
+                spritedata[x]['Regions'][y]['RegionZeroY'] = \
+                    int(round(abs(spritedata[x]['Regions'][y]['Bottom']) * (
+                                tmpY / (spritedata[x]['Regions'][y]['Top'] - spritedata[x]['Regions'][y]['Bottom']))))
+            except ZeroDivisionError:
+                spritedata[x]['Regions'][y]['RegionZeroY'] = 0
 
             # sprite image dimensions
             # max sprite size is determined from the zero points
@@ -88,82 +94,100 @@ def WriteShape(spritedata, sheetdata, ShapeCount, TotalsTexture, filein):
 
     maxrange = len(str(ShapeCount))
 
-    # debug
-    # print(spriteglobals)
-
     #
     # third: all data gathered, time to start cutting
     #
 
     sheetimage = []
+    base_filename = os.path.splitext(os.path.basename(filein))[0]
     for x in range(TotalsTexture):
-        sheetimage.append(Image.open(filein + '_tex' + (x * '_') + '.png').convert('RGBA'))
+        img_path = find_texture(filein, x)
+        if img_path:
+            sheetimage.append(Image.open(img_path).convert('RGBA'))
+        else:
+            print(f"Warning: Texture {x} not found for {filein}")
+            # Add a dummy image to keep indices correct
+            sheetimage.append(None)
 
     for x in range(ShapeCount):
-        # debug
-        # print ('sprite {}'.format(x))
-        # print (spritedata[x])
-
-        # credit goes to the author of http://stackoverflow.com/questions/22588074/polygon-crop-clip-using-python-pil
-        # for how to clip sprites from the spritesheet using a polygon/mask
-
         outImage = Image.new('RGBA', (spriteglobals['SpriteWidth'], spriteglobals['SpriteHeight']), None)
+        has_content = False
 
         for y in range(spritedata[x]['TotalRegions']):
+            sheetID = spritedata[x]['Regions'][y]['SheetID']
+            if sheetID >= len(sheetimage) or sheetimage[sheetID] is None:
+                continue
+
             polygon = []
             for z in range(spritedata[x]['Regions'][y]['NumPoints']):
                 polygon.append((spritedata[x]['Regions'][y]['SheetPoints'][z]['x'],
                                 spritedata[x]['Regions'][y]['SheetPoints'][z]['y']))
 
-            sheetID = spritedata[x]['Regions'][y]['SheetID']
-            imMask = Image.new('L', (sheetdata[sheetID]['x'], sheetdata[sheetID]['y']), 0)
+            if not polygon: continue
+
+            imMask = Image.new('L', (sheetimage[sheetID].width, sheetimage[sheetID].height), 0)
             ImageDraw.Draw(imMask).polygon(polygon, fill=255)
-            # bbox is the cut image size
             bbox = imMask.getbbox()
+            if not bbox: continue
+            
             regionsize = (bbox[2] - bbox[0], bbox[3] - bbox[1])
             imMask = imMask.crop(bbox)
 
             tmpRegion = Image.new('RGBA', regionsize, None)
-
             tmpRegion.paste(sheetimage[sheetID].crop(bbox), None, imMask)
+            
             if (spritedata[x]['Regions'][y]['Mirroring'] == 1):
-                tmpRegion = tmpRegion.transform(regionsize, Image.EXTENT, (regionsize[0], 0, 0, regionsize[1]))
+                tmpRegion = tmpRegion.transpose(Image.FLIP_LEFT_RIGHT)
 
-            tmpRegion = tmpRegion.rotate(spritedata[x]['Regions'][y]['Rotation'], expand=True)
+            if spritedata[x]['Regions'][y]['Rotation'] != 0:
+                tmpRegion = tmpRegion.rotate(spritedata[x]['Regions'][y]['Rotation'], expand=True)
 
-            # debug: save sprite components
-            # tmpRegion.save(pathout + '/' + filein + '_sprite_dbg_' + str(x) + '_' + str(y) + '
-
-            # align the zeroes
             pasteLeft = spriteglobals['GlobalZeroX'] - spritedata[x]['Regions'][y]['RegionZeroX']
             pasteTop = spriteglobals['GlobalZeroY'] - spritedata[x]['Regions'][y]['RegionZeroY']
 
-            # debug: where image is pasted
-            # print('paste sprite {} region {} on {},{}'.format(x,  y,  pasteLeft,  pasteTop))
-
             outImage.paste(tmpRegion, (pasteLeft, pasteTop), tmpRegion)
-        outImage.save(pathout + '/' + filein + '_sprite_' + str(x).rjust(maxrange, '0') + '.png')
+            has_content = True
+            
+        if has_content:
+            outImage.save(os.path.join(pathout, f"{base_filename}_sprite_{str(x).rjust(maxrange, '0')}.png"))
 
     print('done')
 
 
+def find_texture(filein, index):
+    base = os.path.splitext(filein)[0]
+    suffix = (index * '_')
+    candidates = [
+        f"{base}_tex{suffix}.png",
+        f"{base}_tex{index}.png",
+        f"{base.replace('.sc', '')}_tex{suffix}.png",
+        f"{base}_tex.png" if index == 0 else None
+    ]
+    for c in candidates:
+        if c and os.path.exists(c):
+            return c
+    return None
+
+
 def path_out(filein):
-    pathout = os.getcwd() + '/' + filein + '_out'
+    base_name = os.path.splitext(os.path.basename(filein))[0]
+    pathout = os.path.join(os.getcwd(), base_name + '_out')
     if not (os.path.exists(pathout)):
         os.makedirs(pathout)
     return pathout
 
 
 def region_rotation(region):
-    # first: determine orientation and mirroring
-    # ref: http://stackoverflow.com/questions/1165647/how-to-determine-if-a-list-of-polygon-points-are-in-clockwise-order
     sumSheet = 0
     sumShape = 0
     for z in range(region['NumPoints']):
-        sumSheet += ((region['SheetPoints'][(z + 1) % (region['NumPoints'])]['x'] - region['SheetPoints'][z]['x']) *
-                     (region['SheetPoints'][(z + 1) % (region['NumPoints'])]['y'] + region['SheetPoints'][z]['y']))
-        sumShape += ((region['ShapePoints'][(z + 1) % (region['NumPoints'])]['x'] - region['ShapePoints'][z]['x']) *
-                     (region['ShapePoints'][(z + 1) % (region['NumPoints'])]['y'] + region['ShapePoints'][z]['y']))
+        p1_sheet = region['SheetPoints'][z]
+        p2_sheet = region['SheetPoints'][(z + 1) % (region['NumPoints'])]
+        sumSheet += (p2_sheet['x'] - p1_sheet['x']) * (p2_sheet['y'] + p1_sheet['y'])
+        
+        p1_shape = region['ShapePoints'][z]
+        p2_shape = region['ShapePoints'][(z + 1) % (region['NumPoints'])]
+        sumShape += (p2_shape['x'] - p1_shape['x']) * (p2_shape['y'] + p1_shape['y'])
 
     sheetOrientation = -1 if (sumSheet < 0) else 1
     shapeOrientation = -1 if (sumShape < 0) else 1
@@ -171,90 +195,68 @@ def region_rotation(region):
     region['Mirroring'] = 0 if (shapeOrientation == sheetOrientation) else 1
 
     if (region['Mirroring'] == 1):
-        # what, just horizontally mirror the points?
         for x in range(region['NumPoints']):
             region['ShapePoints'][x]['x'] *= -1
 
+    if region['NumPoints'] < 2:
+        region['Rotation'] = 0
+        return region
+
     # define region rotation
-    # pX, qX mean "where in X is point 1, according to point 0"
-    # pY, qY mean "where in Y is point 1, according to point 0"
-    # possible values are "M"ore, "L"ess and "S"ame
-    if (region['SheetPoints'][1]['x'] > region['SheetPoints'][0]['x']):
-        px = 'M'
-    elif (region['SheetPoints'][1]['x'] < region['SheetPoints'][0]['x']):
-        px = 'L'
-    else:
-        px = 'S'
+    if (region['SheetPoints'][1]['x'] > region['SheetPoints'][0]['x']): px = 'M'
+    elif (region['SheetPoints'][1]['x'] < region['SheetPoints'][0]['x']): px = 'L'
+    else: px = 'S'
 
-    if (region['SheetPoints'][1]['y'] < region['SheetPoints'][0]['y']):
-        py = 'M'
-    elif (region['SheetPoints'][1]['y'] > region['SheetPoints'][0]['y']):
-        py = 'L'
-    else:
-        py = 'S'
+    if (region['SheetPoints'][1]['y'] < region['SheetPoints'][0]['y']): py = 'M'
+    elif (region['SheetPoints'][1]['y'] > region['SheetPoints'][0]['y']): py = 'L'
+    else: py = 'S'
 
-    if (region['ShapePoints'][1]['x'] > region['ShapePoints'][0]['x']):
-        qx = 'M'
-    elif (region['ShapePoints'][1]['x'] < region['ShapePoints'][0]['x']):
-        qx = 'L'
-    else:
-        qx = 'S'
+    if (region['ShapePoints'][1]['x'] > region['ShapePoints'][0]['x']): qx = 'M'
+    elif (region['ShapePoints'][1]['x'] < region['ShapePoints'][0]['x']): qx = 'L'
+    else: qx = 'S'
 
-    if (region['ShapePoints'][1]['y'] > region['ShapePoints'][0]['y']):
-        qy = 'M'
-    elif (region['ShapePoints'][1]['y'] < region['ShapePoints'][0]['y']):
-        qy = 'L'
-    else:
-        qy = 'S'
+    if (region['ShapePoints'][1]['y'] > region['ShapePoints'][0]['y']): qy = 'M'
+    elif (region['ShapePoints'][1]['y'] < region['ShapePoints'][0]['y']): qy = 'L'
+    else: qy = 'S'
 
-    # now, define rotation
-    # short of listing all 32 outcomes (like MM-MM, MM-ML, MM-MS, etc.), this monstrous if block seems a better way to do this
-    # "HIC SUNT DRACONES"
     rotation = 0
-    if (px == qx and py == qy):
-        rotation = 0
+    if (px == qx and py == qy): rotation = 0
     elif (px == 'S'):
         if (px == qy):
-            if (py == qx):
-                rotation = 90
-            elif (py != qx):
-                rotation = 270
-        elif (px != qy):
-            rotation = 180
+            if (py == qx): rotation = 90
+            elif (py != qx): rotation = 270
+        elif (px != qy): rotation = 180
     elif (py == 'S'):
         if (py == qx):
-            if (px == qy):
-                rotation = 270
-            elif (px != qy):
-                rotation = 90
-        elif (py != qx):
-            rotation = 180
-    elif (px != qx and py != qy):
-        rotation = 180
+            if (px == qy): rotation = 270
+            elif (px != qy): rotation = 90
+        elif (py != qx): rotation = 180
+    elif (px != qx and py != qy): rotation = 180
     elif (px == py):
-        if (px != qx):
-            rotation = 270
-        elif (py != qy):
-            rotation = 90
+        if (px != qx): rotation = 270
+        elif (py != qy): rotation = 90
     elif (px != py):
-        if (px != qx):
-            rotation = 90
-        elif (py != qy):
-            rotation = 270
+        if (px != qx): rotation = 90
+        elif (py != qy): rotation = 270
 
     if (sheetOrientation == -1 and (rotation == 90 or rotation == 270)):
         rotation = (rotation + 180) % 360
 
     region['Rotation'] = rotation
-
     return region
 
 
 def process(data, filename):
-    data = data
-    Stream = BytesIO(data)
-    OffsetShape = 0
-    OffsetSheet = 0
+    if data[:2] == b"SC":
+        reader = Reader(data)
+        reader.read(2)
+        reader.read_uint32(byteorder="big") # major
+        reader.read_uint32(byteorder="big") # minor
+        hash_len = reader.read_uint32(byteorder="big")
+        reader.read(hash_len)
+        data = decompress(reader.read())
+        
+    Stream = Reader(data)
     ShapeCount = ReadUint16(Stream)
     TotalsAniamtions = ReadUint16(Stream)
     TotalsTexture = ReadUint16(Stream)
@@ -266,62 +268,33 @@ def process(data, filename):
     sheetdata = [{'x': 0, 'y': 0, 'Divider': 1} for x in range(TotalsTexture)]
     spritedata = [{'ID': 0, 'TotalRegions': 0, 'Regions': []} for x in range(ShapeCount)]
 
-    sheetimage = []
-    for x in range(TotalsTexture):
-        if os.path.exists(filename + '_tex' + (x * '_') + '.png'):
-            sheetimage.append(Image.open(filename + '_tex' + (x * '_') + '.png').convert('RGBA'))
-        else:
-            print(
-                "{} don't exist : if your png files is named *_lowres_tex or *_highres_tex please rename it to *_tex".format(
-                    filename + '_tex' + (x * '_') + '.png'))
-            sys.exit()
     Stream.read(5)  # 5 00 bytes
-
     ExportCount = ReadUint16(Stream)
+    for i in range(ExportCount): ReadUint16(Stream)
+    for i in range(ExportCount): ReadString(Stream)
 
-    for i in range(ExportCount):
-        ReadUint16(Stream)
+    OffsetShape = 0
+    OffsetSheet = 0
 
-    for i in range(ExportCount):
-        ReadString(Stream, ReadByte(Stream))
-
-    while len(data[Stream.tell():]) != 0:
-
+    while len(Stream) != 0:
         DataBlockTag = Stream.read(1).hex()
         DataBlockSize = ReadUint32(Stream)
-
-        # print('[*] DataBlockTag {} , size = {}'.format(DataBlockTag,DataBlockSize))
+        if DataBlockSize == 0: continue
+        
+        block_data = Stream.read(DataBlockSize)
+        block_reader = Reader(block_data)
 
         if DataBlockTag == "01" or DataBlockTag == "18":
-
-            PixelType = ReadByte(Stream)
-            # width
-            sheetdata[OffsetSheet]['x'] = ReadUint16(Stream)
-
-            sheetdata[OffsetSheet]['y'] = ReadUint16(Stream)
-
-            if sheetimage[OffsetSheet].width != sheetdata[OffsetSheet]['x'] and sheetimage[OffsetSheet].height != \
-                    sheetdata[OffsetSheet]['y']:
-                UseLowres = True
-
+            ReadByte(block_reader) # PixelType
+            sheetdata[OffsetSheet]['x'] = ReadUint16(block_reader)
+            sheetdata[OffsetSheet]['y'] = ReadUint16(block_reader)
             OffsetSheet += 1
-
             continue
 
-        if DataBlockTag == "1e":
-            continue
-        elif DataBlockTag == "1a":
-            continue
-        elif DataBlockTag == "12":  # Polygon
-
-            if UseLowres:
-                i = 2
-            else:
-                i = 1
-            spritedata[OffsetShape]['ID'] = ReadUint16(Stream)
-
-            spritedata[OffsetShape]['TotalRegions'] = ReadUint16(Stream)
-            TotalsPointCount = ReadUint16(Stream)
+        if DataBlockTag == "12":  # Polygon
+            spritedata[OffsetShape]['ID'] = ReadUint16(block_reader)
+            spritedata[OffsetShape]['TotalRegions'] = ReadUint16(block_reader)
+            TotalsPointCount = ReadUint16(block_reader)
 
             spritedata[OffsetShape]['Regions'] = [
                 {'SheetID': 0, 'NumPoints': 0, 'Rotation': 0, 'Mirroring': 0, 'ShapePoints': [], 'SheetPoints': [],
@@ -330,91 +303,34 @@ def process(data, filename):
                 range(spritedata[OffsetShape]['TotalRegions'])]
 
             for y in range(spritedata[OffsetShape]['TotalRegions']):
+                tag16 = block_reader.read(1).hex()
+                if tag16 == "16":
+                    sz16 = ReadUint32(block_reader)
+                    spritedata[OffsetShape]['Regions'][y]['SheetID'] = ReadByte(block_reader)
+                    num_points = ReadByte(block_reader)
+                    spritedata[OffsetShape]['Regions'][y]['NumPoints'] = num_points
 
-                DataBlockTag16 = Stream.read(1).hex()
+                    spritedata[OffsetShape]['Regions'][y]['ShapePoints'] = [{'x': 0, 'y': 0} for _ in range(num_points)]
+                    spritedata[OffsetShape]['Regions'][y]['SheetPoints'] = [{'x': 0, 'y': 0} for _ in range(num_points)]
 
-                if DataBlockTag16 == "16":
-                    DataBlockSize16 = ReadUint32(Stream)
-                    spritedata[OffsetShape]['Regions'][y]['SheetID'] = ReadByte(Stream)
+                    for z in range(num_points):
+                        spritedata[OffsetShape]['Regions'][y]['ShapePoints'][z]['x'] = ReadInt32(block_reader)
+                        spritedata[OffsetShape]['Regions'][y]['ShapePoints'][z]['y'] = ReadInt32(block_reader)
 
-                    spritedata[OffsetShape]['Regions'][y]['NumPoints'] = ReadByte(Stream)
-
-                    spritedata[OffsetShape]['Regions'][y]['ShapePoints'] = [{'x': 0, 'y': 0} for z in range(
-                        spritedata[OffsetShape]['Regions'][y]['NumPoints'])]
-                    spritedata[OffsetShape]['Regions'][y]['SheetPoints'] = [{'x': 0, 'y': 0} for z in range(
-                        spritedata[OffsetShape]['Regions'][y]['NumPoints'])]
-
-                    for z in range(spritedata[OffsetShape]['Regions'][y]['NumPoints']):
-                        spritedata[OffsetShape]['Regions'][y]['ShapePoints'][z]['x'] = ReadInt32(Stream)
-                        spritedata[OffsetShape]['Regions'][y]['ShapePoints'][z]['y'] = ReadInt32(Stream)
-
-                    for z in range(spritedata[OffsetShape]['Regions'][y]['NumPoints']):
-                        spritedata[OffsetShape]['Regions'][y]['SheetPoints'][z]['x'] = ReadUint16(Stream)
-                        spritedata[OffsetShape]['Regions'][y]['SheetPoints'][z]['y'] = ReadUint16(Stream)
-
-                        spritedata[OffsetShape]['Regions'][y]['SheetPoints'][z]['x'] = int(
-                            (round(spritedata[OffsetShape]['Regions'][y]['SheetPoints'][z]['x'] *
-                                   (sheetdata[spritedata[OffsetShape]['Regions'][y]['SheetID']]['x'] / 65535))) / i)
-                        spritedata[OffsetShape]['Regions'][y]['SheetPoints'][z]['y'] = int(
-                            round((spritedata[OffsetShape]['Regions'][y]['SheetPoints'][z]['y'] *
-                                   (sheetdata[spritedata[OffsetShape]['Regions'][y]['SheetID']]['y'] / 65535))) / i)
-            Stream.read(5)
+                    for z in range(num_points):
+                        spritedata[OffsetShape]['Regions'][y]['SheetPoints'][z]['x'] = int(ReadUint16(block_reader) * sheetdata[spritedata[OffsetShape]['Regions'][y]['SheetID']]['x'] / 65535)
+                        spritedata[OffsetShape]['Regions'][y]['SheetPoints'][z]['y'] = int(ReadUint16(block_reader) * sheetdata[spritedata[OffsetShape]['Regions'][y]['SheetID']]['y'] / 65535)
             OffsetShape += 1
-
             continue
-
-        elif DataBlockTag == "08":  # Matrix
-            Points = []
-            for i in range(6):
-                Points.append(ReadInt32(Stream))
-            continue
-        elif DataBlockTag == "0c":  # Animation
-            ClipID = ReadUint16(Stream)
-            ClipFPS = ReadByte(Stream)
-            # print('ClipFPS = {} , offset = {}'.format(ClipFPS,hex(Stream.tell())[:2] + hex(Stream.tell())[2:].upper()))
-            ClipFrameCount = ReadUint16(Stream)
-
-            cnt1 = ReadInt32(Stream)
-
-            for i in range(cnt1):
-                saTag12Nr = ReadUint16(Stream)
-                saTag08Nr = ReadUint16(Stream)
-                saTag09Nr = ReadUint16(Stream)
-
-            cnt2 = ReadInt16(Stream)
-
-            for i in range(cnt2):
-                cnt2shapeID = ReadInt16(Stream)
-
-            for i in range(cnt2):
-                cnt2opacity = ReadByte(Stream)
-
-            for i in range(cnt2):
-                StringLength = ReadByte(Stream)
-                if StringLength < 255:
-                    String2 = ReadString(Stream, StringLength)
-            continue
-
-        else:
-            Stream.read(DataBlockSize)
-            pass
 
     WriteShape(spritedata, sheetdata, ShapeCount, TotalsTexture, filename)
 
 
 if __name__ == '__main__':
-    # filename = sys.argv[1]
-    parser = argparse.ArgumentParser(
-        description='Extract data from Clash Royale sprite files.All output is saved to a folder named <input_file_name>_out. (Fix by GaLaXy1036)')
-    parser.add_argument('-s', help='extracts all sprites from a file (requires extracted PNG(s) in the same folder)',
-                        type=str, nargs=1)
+    parser = argparse.ArgumentParser(description='Extract sprites from Clash Royale SC files.')
+    parser.add_argument('input', help='Input SC file', type=str)
     args = parser.parse_args()
 
-    if args.s:
-
-        if args.s[0].endswith('.sc'):
-            print('Extract this file with QuickBMS first; then, try to pass it to this script')
-            sys.exit()
-        else:
-            with open(args.s[0], 'rb') as f:
-                process(f.read(), args.s[0])
+    if args.input:
+        with open(args.input, 'rb') as f:
+            process(f.read(), args.input)
