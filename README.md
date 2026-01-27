@@ -11,18 +11,20 @@ pip install -r requirements.txt
 ### 1. Extract Textures (`dumpsc.py`)
 Use this to extract raw PNG textures from `.sc` or `_tex.sc` files. It handles modern compression (Zstandard, LZHAM) and various pixel formats (ASTC, ETC1, RGBA8888, etc.).
 
+**Batch Processing:**
+You can pass multiple files or entire directories to process them in batches.
 ```console
-# Extract textures from a specific file
-python dumpsc.py path/to/ui_tex.sc
+# Process all files in a folder
+python dumpsc.py path/to/sc_folder/
 
-# Extract textures from all files in a directory
-python dumpsc.py path/to/assets/sc/
+# Process multiple specific files
+python dumpsc.py file1_tex.sc file2_tex.sc
+```
 
-# Use --old for older SC formats (e.g., _dl.sc)
+**Legacy Files:**
+If you are missing `_tex.sc` files or are working with older `_dl.sc` files, use the `--old` flag:
+```console
 python dumpsc.py path/to/filename_dl.sc --old
-
-# Decompress CSV files
-python dumpsc.py path/to/logic.csv
 ```
 
 ### 2. Reconstruct Sprites (`sc_decode.py`)
